@@ -1,5 +1,13 @@
 import MetaTrader5 as mt5
 import os
+import tensorflow as tf
+from tensorflow import keras
+from keras.models import Sequential
+from keras.layers import Dense
+from sklearn.model_selection import train_test_split
+import pandas as pd
+import numpy as np
+
 
 if not mt5.initialize():  # This will open MT5 app in your pc
     print("initialize() failed, error code =",mt5.last_error())
@@ -17,6 +25,23 @@ if not os.path.exists(dataset_path):
     quit()
 
 
+# Loading the dataset 
+
+csv_name = "EURUSD.PERIOD_H1.1000.targ=MOVEMENT.csv"
+
+data = pd.read_csv(dataset_path+"\\"+csv_name)
+
+if data.empty:
+    print(f"No such dataset or Empty dataset csv = {csv_name}")
+    quit() # quit the program
+    
+
+input_size = data.shape[1]
+
+print("Input size = ",input_size)
+
+
+print(data.head())
 
 
 
