@@ -4,6 +4,7 @@ import tensorflow as tf
 from tensorflow import keras
 from keras.models import Sequential
 from keras.layers import Dense, Dropout
+from keras.models import load_model
 
 from sklearn.model_selection import train_test_split
 from sklearn import metrics
@@ -11,15 +12,17 @@ from sklearn import metrics
 import pandas as pd
 import numpy as np
 
-
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from keras.utils import to_categorical
 from keras import optimizers
+from keras.regularizers import l2
 from keras.callbacks import EarlyStopping
 
+import onnx
+import tf2onnx
 
+tf.random.set_seed(42)
 
 if not mt5.initialize():  # This will open MT5 app in your pc
     print("initialize() failed, error code =",mt5.last_error())
@@ -47,109 +50,164 @@ class NeuralNetworkClass():
             quit() # quit the program
         
 
-        print(self.data.head())
+        print(self.data.head()) # Print 5 first rows of a given data
 
         self.target_column = target_column
         # spliting the data into training and testing samples
 
         X = self.data.drop(columns=self.target_column).to_numpy() # droping the targeted column, the rest is x variables
         Y = self.data[self.target_column].to_numpy() # We convert data arrays to numpy arrays compartible with sklearn and tensorflow
-
-        self.train_x, self.test_x, self.train_y, self.test_y = train_test_split(X, Y, test_size=0.3, random_state=42)
-
-        self.input_size = X.shape[1]
-
-        self.classes = np.unique(Y) # Get the avaiable classes from a target variable
+                
         
-        self.output_size = len(self.classes) # count those number of classes
+        self.train_x, self.test_x, self.train_y, self.test_y = train_test_split(X, Y, test_size=0.3, random_state=42) # splitting the data into training and testing samples 
+        
+        print(f"train x shape {self.train_x.shape}\ntest x shape {self.test_x.shape}")
+                
+        self.input_size = self.train_x.shape[-1] # obtaining the number of columns in x variable as our inputs
+        
+        self.output_size = 1 # We are solving for a regression problem we need to have a single output neuron
         
         self.batch_size = batch_size
         
         self.model = None # Object to store the model
-                
-
-    def BuildNeuralNetwork(self, activation_function='sigmoid', neurons = 10, dropout_rate=0.5):
-
-        self.model = Sequential()
-
-        # Input layer: Specify the input shape (number of features) in the 'input_shape' argument.
-        self.model.add(Dense(units=64, activation=activation_function, input_shape=(self.input_size,), kernel_initializer='he_uniform'))
-
-        # Hidden layer: Add as many hidden layers as you need.
-        self.model.add(Dense(units=32, activation=activation_function, kernel_initializer='he_uniform'))
-        self.model.add(Dropout(dropout_rate)) 
         
-        # Hidden layer: Add as many hidden layers as you need.
-        '''
-        self.model.add(Dense(units=10, activation=activation_function, kernel_initializer='he_uniform'))
-        self.model.add(Dropout(dropout_rate)) 
-        '''
-        # Output layer: Specify the number of output neurons (units) and activation function.
-        self.model.add(Dense(units=self.output_size, activation='softmax', kernel_initializer='he_uniform'))
+        self.plots_directory = "Plots"
+        self.models_directory = "Models"
+                
+        
+    def BuildNeuralNetwork(self, activation_function='relu', neurons = 10):
+
+        # Create a Feedforward Neural Network model
+        self.model = keras.Sequential([
+            keras.layers.Input(shape=(self.input_size,)),  # Input layer
+            keras.layers.Dense(units=neurons, activation=activation_function, activity_regularizer=l2(0.01), kernel_initializer="he_uniform"),  # Hidden layer with an activation function
+            keras.layers.Dense(units=self.output_size, activation='linear', activity_regularizer=l2(0.01), kernel_initializer="he_uniform")  
+        ])
 
         # Print a summary of the model's architecture.
         self.model.summary()
 
 
-    def train_network(self, epochs=100, learning_rate=1e-3, loss='binary_crossentropy'):
 
-        early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    def train_network(self, epochs=100, learning_rate=0.001, loss='mean_squared_error'):
 
-        adam = optimizers.Adam(learning_rate=learning_rate)
+        early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True) # Early stoppage mechanism | stop training when there is no major change in loss in the last to epochs, defined by the variable patience
+
+        adam = optimizers.Adam(learning_rate=learning_rate) # Adam optimizer >> https://machinelearningmastery.com/adam-optimization-algorithm-for-deep-learning/
     
         # Compile the model: Specify the loss function, optimizer, and evaluation metrics.
-        self.model.compile(loss=loss, optimizer=adam, metrics=['accuracy'])    
+        self.model.compile(loss=loss, optimizer=adam, metrics=['mae'])    
 
         # One hot encode the validation and train target variables
          
-        validation_y = to_categorical(self.test_y, num_classes=len(self.classes))
-        y = to_categorical(self.train_y, num_classes=len(self.classes))
-        
-        self.model.fit(self.train_x, y, epochs=epochs, batch_size=self.batch_size, validation_data=(self.test_x, validation_y), callbacks=[early_stopping], verbose=2) #Training the model
-        
-        forecast = self.model.predict(self.train_x)
-        actual = self.train_y
-        
-        #obtain the outcome
-        
-        forecast = np.argmax(forecast, axis=1) # Extracting a predicted binary
+        validation_y = self.test_y
+        y = self.train_y
 
-        # Compute confusion matrix
-        cm = metrics.confusion_matrix(y_true=actual, y_pred=forecast, labels= self.classes)
+        history = self.model.fit(self.train_x, y, epochs=epochs, batch_size=self.batch_size, validation_data=(self.test_x, validation_y), callbacks=[early_stopping], verbose=2)
         
-        # Plot confusion matrix
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=self.classes, yticklabels=self.classes)
-        plt.xlabel('Predicted Labels')
-        plt.ylabel('Actual Labels')
-        title = f'MLP-NN {self.target_column} Confusion Matrix - Train'
+        if not os.path.exists(self.plots_directory): #create plots path if it doesn't exist for saving the train-test plots
+            os.makedirs(self.plots_directory)
+        
+        # save the loss and validation loss plot
+        
+        plt.figure(figsize=(12, 6))
+        plt.plot(history.history['loss'], label='Training Loss')
+        plt.plot(history.history['val_loss'], label='Validation Loss')
+        plt.xlabel('Epochs')
+        plt.ylabel('Loss')
+        plt.legend()
+        title = 'Training and Validation Loss Curves'
         plt.title(title)
+        plt.savefig(fname=f"{self.plots_directory}\\"+title)
+
         
-        directory = "Plots"
-
-        if not os.path.exists(directory): #create plots path if it doesn't exist for saving the train-test plots
-            os.makedirs(directory)
+        # use the trained model to make predictions on the trained data 
         
-        plt.savefig(fname=f"{directory}\\"+title)    
+        pred = self.model.predict(self.train_x)
+
+        acc = metrics.r2_score(self.train_y, pred)
+
+        # Plot actual & pred
+        count = [i*0.1 for i in range(len(self.train_y))]
+
+        title = f'MLP {self.target_column} - Train'
+        
+        # Saving the plot containing information about predictions and actual values
+        
+        plt.figure(figsize=(7, 5))
+        plt.plot(count, self.train_y, label = "Actual")
+        plt.plot(count, pred,  label = "forecast")
+        plt.xlabel('Actuals')
+        plt.ylabel('Preds')
+        plt.title(title+f" | Train acc={acc}")
+        plt.legend()
+        plt.savefig(fname=f"{self.plots_directory}\\"+title)    
+
+        self.model.save(f"Models\\MLP.REG.{self.target_column}.{self.data.shape[0]}.h5") #saving the model in h5 format, just for the record | not important really
+        self.saveONNXModel()
+
+
+    def saveONNXModel(self, folder="ONNX Models"):
+        
+        path = data_path + "\\MQL5\\Files\\" + folder 
+        
+        if not os.path.exists(path): # create this path if it doesn't exist
+            os.makedirs(path)
+        
+        onnx_model_name = f"MLP.REG.{self.target_column}.{self.data.shape[0]}.onnx"
+        path +=  "\\" + onnx_model_name
         
         
-        self.model.save(f"Models\\lstm-pat.{self.target_column}.h5") 
+        loaded_keras_model = load_model(f"Models\\MLP.REG.{self.target_column}.{self.data.shape[0]}.h5") 
+        
+        onnx_model, _ = tf2onnx.convert.from_keras(loaded_keras_model, output_path=path)
+
+        onnx.save(onnx_model, path )
+        
+        print(f'Saved model to {path}')
+        
+    
+    def test_network(self):
+        # Plot actual & pred
+        
+        count = [i*0.1 for i in range(len(self.test_y))]
+
+        title = f'MLP {self.target_column} - Test'
+        
+
+        pred = self.model.predict(self.test_x)
+
+        acc = metrics.r2_score(self.test_y, pred)
+
+        
+        # Saving the plot containing information about predictions and actual values
+        
+        plt.figure(figsize=(7, 5))
+        plt.plot(count, self.test_y, label = "Actual")
+        plt.plot(count, pred,  label = "forecast")
+        plt.xlabel('Actuals')
+        plt.ylabel('Preds')
+        plt.title(title+f" | Train acc={acc}")
+        plt.legend()
+        plt.savefig(fname=f"{self.plots_directory}\\"+title)    
+        
+        if not os.path.exists(self.plots_directory): #create plots path if it doesn't exist for saving the train-test plots
+            os.makedirs(self.plots_directory)
+        
+        plt.savefig(fname=f"{self.plots_directory}\\"+title)    
+        
+        return acc
 
 
-    def _acc(self, confusion_matrix):
-        diagonal_sum = np.trace(confusion_matrix)
-        total_sum = np.sum(confusion_matrix)
-        overall_accuracy = diagonal_sum / total_sum
-        return overall_accuracy
+csv_name = "EURUSD.PERIOD_H1.10000.targ=CLOSE.csv"
+
+nn = NeuralNetworkClass(csv_name=csv_name, target_column="CLOSE", batch_size=32)
+
+nn.BuildNeuralNetwork(activation_function="relu", neurons=10)
+nn.train_network(epochs=50, learning_rate=0.01, loss='mse')
 
 
-
-
-csv_name = "EURUSD.PERIOD_H1.1000.targ=MOVEMENT.csv"
-
-nn = NeuralNetworkClass(csv_name=csv_name, target_column="MOVEMENT")
-nn.BuildNeuralNetwork(activation_function="tanh", neurons=10)
-nn.train_network(epochs=100, learning_rate=1e-4)
+print("Test accuracy =",nn.test_network())
 
 
 mt5.shutdown() # This closes the program
